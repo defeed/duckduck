@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Duck Pond</title>
+<style>
+  * { margin: 0; padding: 0; }
+  body { overflow: hidden; background: #4a7c3f; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="pond"></canvas>
+<script>
+const canvas = document.getElementById('pond');
+const ctx = canvas.getContext('2d');
+
+let W, H, pondCx, pondCy, pondRx, pondRy;
+const ducks = [];
+const ripples = [];
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  pondCx = W / 2;
+  pondCy = H / 2;
+  pondRx = W * 0.38;
+  pondRy = H * 0.38;
+}
+resize();
+window.addEventListener('resize', resize);
+
+function isInPond(x, y) {
+  return ((x - pondCx) ** 2) / (pondRx ** 2) + ((y - pondCy) ** 2) / (pondRy ** 2) <= 1;
+}
+
+// Perlin-like noise for water
+const perm = new Uint8Array(512);
+const grad3 = [[1,1],[-1,1],[1,-1],[-1,-1],[1,0],[-1,0],[0,1],[0,-1]];
+(function initNoise() {
+  const p = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) p[i] = i;
+  for (let i = 255; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [p[i], p[j]] = [p[j], p[i]]; }
+  for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+})();
+
+function noise2d(x, y) {
+  const X = Math.floor(x) & 255, Y = Math.floor(y) & 255;
+  const xf = x - Math.floor(x), yf = y - Math.floor(y);
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const aa = perm[perm[X] + Y] & 7, ab = perm[perm[X] + Y + 1] & 7;
+  const ba = perm[perm[X + 1] + Y] & 7, bb = perm[perm[X + 1] + Y + 1] & 7;
+  const g = grad3;
+  const n00 = g[aa][0] * xf + g[aa][1] * yf;
+  const n10 = g[ba][0] * (xf - 1) + g[ba][1] * yf;
+  const n01 = g[ab][0] * xf + g[ab][1] * (yf - 1);
+  const n11 = g[bb][0] * (xf - 1) + g[bb][1] * (yf - 1);
+  return n00 + u * (n10 - n00) + v * (n01 - n00) + u * v * (n11 - n10 - n01 + n00);
+}
+
+function fbm(x, y, octaves) {
+  let val = 0, amp = 0.5, freq = 1;
+  for (let i = 0; i < octaves; i++) {
+    val += amp * noise2d(x * freq, y * freq);
+    amp *= 0.5;
+    freq *= 2;
+  }
+  return val;
+}
+
+// Off-screen canvas for water texture
+let waterCanvas, waterCtx;
+function initWaterCanvas() {
+  waterCanvas = document.createElement('canvas');
+  waterCanvas.width = W;
+  waterCanvas.height = H;
+  waterCtx = waterCanvas.getContext('2d');
+}
+
+// Ripple class for water effect
+class Ripple {
+  constructor(x, y, big) {
+    this.x = x;
+    this.y = y;
+    this.radius = big ? 3 : 2;
+    this.maxRadius = big ? (50 + Math.random() * 30) : (25 + Math.random() * 20);
+    this.alpha = big ? 0.6 : 0.4;
+    this.lineWidth = big ? 2 : 1.2;
+  }
+  update() {
+    this.radius += 0.5;
+    this.alpha = 0.5 * (1 - this.radius / this.maxRadius);
+    return this.radius < this.maxRadius;
+  }
+  draw() {
+    if (this.alpha <= 0) return;
+    // Outer glow
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius + 1, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(180,220,255,${this.alpha * 0.3})`;
+    ctx.lineWidth = this.lineWidth + 2;
+    ctx.stroke();
+    // Main ring
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(255,255,255,${this.alpha})`;
+    ctx.lineWidth = this.lineWidth;
+    ctx.stroke();
+  }
+}
+
+// Duck class
+class Duck {
+  constructor(x, y) {
+    this.x = x;
+    this.y = y;
+    this.size = 18 + Math.random() * 6;
+    this.angle = Math.random() * Math.PI * 2;
+    this.speed = 0.3 + Math.random() * 0.4;
+    this.wobble = 0;
+    this.wobbleSpeed = 0.02 + Math.random() * 0.02;
+    this.turnTimer = 0;
+    this.turnInterval = 120 + Math.random() * 200;
+    this.targetAngle = this.angle;
+    this.rippleTimer = 0;
+  }
+
+  update() {
+    // Occasionally change direction
+    this.turnTimer++;
+    if (this.turnTimer > this.turnInterval) {
+      this.turnTimer = 0;
+      this.turnInterval = 120 + Math.random() * 200;
+      this.targetAngle = this.angle + (Math.random() - 0.5) * Math.PI;
+    }
+
+    // Smoothly turn toward target angle
+    let diff = this.targetAngle - this.angle;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    this.angle += diff * 0.03;
+
+    // Move
+    this.x += Math.cos(this.angle) * this.speed;
+    this.y += Math.sin(this.angle) * this.speed;
+
+    // Wobble for floating feel
+    this.wobble += this.wobbleSpeed;
+
+    // Stay in pond — steer back if near edge
+    const nx = (this.x - pondCx) / pondRx;
+    const ny = (this.y - pondCy) / pondRy;
+    const dist = nx * nx + ny * ny;
+    if (dist > 0.75) {
+      // Steer toward center
+      this.targetAngle = Math.atan2(pondCy - this.y, pondCx - this.x) + (Math.random() - 0.5) * 0.5;
+    }
+
+    // Spawn small ripples
+    this.rippleTimer++;
+    if (this.rippleTimer > 40) {
+      this.rippleTimer = 0;
+      ripples.push(new Ripple(
+        this.x - Math.cos(this.angle) * this.size * 0.3,
+        this.y - Math.sin(this.angle) * this.size * 0.3
+      ));
+    }
+  }
+
+  draw() {
+    const s = this.size;
+    const bobY = Math.sin(this.wobble) * 1.5;
+
+    ctx.save();
+    ctx.translate(this.x, this.y + bobY);
+    ctx.rotate(this.angle);
+
+    // Body shadow (water reflection)
+    ctx.beginPath();
+    ctx.ellipse(0, 2, s * 0.7, s * 0.45, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,60,120,0.15)';
+    ctx.fill();
+
+    // Body
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 0.65, s * 0.42, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#f5d442';
+    ctx.fill();
+    ctx.strokeStyle = '#c4a620';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Head
+    ctx.beginPath();
+    ctx.arc(s * 0.45, 0, s * 0.28, 0, Math.PI * 2);
+    ctx.fillStyle = '#f5d442';
+    ctx.fill();
+    ctx.strokeStyle = '#c4a620';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Eye
+    ctx.beginPath();
+    ctx.arc(s * 0.52, -s * 0.08, s * 0.06, 0, Math.PI * 2);
+    ctx.fillStyle = '#222';
+    ctx.fill();
+
+    // Beak
+    ctx.beginPath();
+    ctx.moveTo(s * 0.7, -s * 0.06);
+    ctx.lineTo(s * 0.92, 0);
+    ctx.lineTo(s * 0.7, s * 0.06);
+    ctx.closePath();
+    ctx.fillStyle = '#e87e22';
+    ctx.fill();
+
+    // Wing detail
+    ctx.beginPath();
+    ctx.ellipse(-s * 0.08, 0, s * 0.32, s * 0.24, 0.1, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(180,150,30,0.5)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Tail feathers
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.6, -s * 0.08);
+    ctx.lineTo(-s * 0.85, -s * 0.18);
+    ctx.lineTo(-s * 0.65, 0);
+    ctx.lineTo(-s * 0.85, s * 0.18);
+    ctx.lineTo(-s * 0.6, s * 0.08);
+    ctx.fillStyle = '#dfc435';
+    ctx.fill();
+
+    ctx.restore();
+  }
+}
+
+// Ambient ripples
+let ambientTimer = 0;
+let frameCount = 0;
+
+function drawPond() {
+  const t = Date.now() * 0.001;
+
+  // Grass background
+  ctx.fillStyle = '#4a7c3f';
+  ctx.fillRect(0, 0, W, H);
+
+  // Grass texture
+  ctx.fillStyle = '#3d6b34';
+  for (let i = 0; i < 200; i++) {
+    const gx = (Math.sin(i * 127.1) * 0.5 + 0.5) * W;
+    const gy = (Math.cos(i * 311.7) * 0.5 + 0.5) * H;
+    if (!isInPond(gx, gy)) {
+      ctx.fillRect(gx, gy, 2, 4);
+    }
+  }
+
+  // Pond shadow
+  ctx.beginPath();
+  ctx.ellipse(pondCx + 5, pondCy + 5, pondRx + 8, pondRy + 8, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.fill();
+
+  // Muddy pond edge
+  ctx.beginPath();
+  ctx.ellipse(pondCx, pondCy, pondRx + 6, pondRy + 6, 0, 0, Math.PI * 2);
+  const edgeGrad = ctx.createRadialGradient(pondCx, pondCy, Math.min(pondRx, pondRy) * 0.9, pondCx, pondCy, Math.max(pondRx, pondRy) + 6);
+  edgeGrad.addColorStop(0, '#5a4a30');
+  edgeGrad.addColorStop(1, '#6b5a3e');
+  ctx.fillStyle = edgeGrad;
+  ctx.fill();
+
+  // --- Water base with depth gradient ---
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(pondCx, pondCy, pondRx, pondRy, 0, 0, Math.PI * 2);
+  ctx.clip();
+
+  // Deep water gradient
+  const waterGrad = ctx.createRadialGradient(
+    pondCx - pondRx * 0.15, pondCy - pondRy * 0.15, 0,
+    pondCx, pondCy, Math.max(pondRx, pondRy)
+  );
+  waterGrad.addColorStop(0, '#4da8c4');
+  waterGrad.addColorStop(0.3, '#3a8aaa');
+  waterGrad.addColorStop(0.7, '#2b6d8a');
+  waterGrad.addColorStop(1, '#1e4f6a');
+  ctx.fillStyle = waterGrad;
+  ctx.fillRect(pondCx - pondRx, pondCy - pondRy, pondRx * 2, pondRy * 2);
+
+  // --- Animated caustic / light patterns ---
+  ctx.globalAlpha = 0.07;
+  ctx.globalCompositeOperation = 'lighter';
+  const step = 40;
+  for (let gx = pondCx - pondRx; gx < pondCx + pondRx; gx += step) {
+    for (let gy = pondCy - pondRy; gy < pondCy + pondRy; gy += step) {
+      const n = fbm(gx * 0.005 + t * 0.3, gy * 0.005 + t * 0.2, 3);
+      const brightness = (n + 0.5) * 255;
+      ctx.fillStyle = `rgb(${brightness * 0.7},${brightness * 0.9},${brightness})`;
+      ctx.fillRect(gx, gy, step, step);
+    }
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+
+  // --- Flowing wave lines ---
+  ctx.globalAlpha = 0.04;
+  for (let w = 0; w < 12; w++) {
+    ctx.beginPath();
+    const baseY = pondCy - pondRy + (w + 0.5) * (pondRy * 2 / 12);
+    for (let x = pondCx - pondRx; x < pondCx + pondRx; x += 4) {
+      const wave = Math.sin(x * 0.015 + t * 0.8 + w) * 8
+                 + Math.sin(x * 0.025 - t * 0.5 + w * 2) * 4
+                 + fbm(x * 0.008 + t * 0.15, w * 0.5, 2) * 12;
+      if (x === pondCx - pondRx) ctx.moveTo(x, baseY + wave);
+      else ctx.lineTo(x, baseY + wave);
+    }
+    ctx.strokeStyle = '#a0d8ef';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // --- Shimmer highlights (moving light reflections) ---
+  for (let i = 0; i < 15; i++) {
+    const sx = pondCx + Math.sin(t * 0.4 + i * 2.1) * pondRx * 0.65;
+    const sy = pondCy + Math.cos(t * 0.3 + i * 1.7) * pondRy * 0.55;
+    const shimmerSize = 15 + Math.sin(t * 1.5 + i) * 8;
+    const shimmerAlpha = 0.03 + Math.sin(t * 2 + i * 0.8) * 0.02;
+    ctx.beginPath();
+    ctx.ellipse(sx, sy, shimmerSize * 2.5, shimmerSize * 0.6, t * 0.2 + i, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(200,235,255,${shimmerAlpha})`;
+    ctx.fill();
+  }
+
+  // --- Depth darkening at edges ---
+  const depthGrad = ctx.createRadialGradient(pondCx, pondCy, Math.min(pondRx, pondRy) * 0.3, pondCx, pondCy, Math.max(pondRx, pondRy));
+  depthGrad.addColorStop(0, 'rgba(0,0,0,0)');
+  depthGrad.addColorStop(0.7, 'rgba(0,0,0,0)');
+  depthGrad.addColorStop(1, 'rgba(0,30,50,0.25)');
+  ctx.fillStyle = depthGrad;
+  ctx.fillRect(pondCx - pondRx, pondCy - pondRy, pondRx * 2, pondRy * 2);
+
+  ctx.restore();
+}
+
+function loop() {
+  drawPond();
+
+  frameCount++;
+
+  // Ambient ripples — more frequent for life
+  ambientTimer++;
+  if (ambientTimer > 50) {
+    ambientTimer = 0;
+    const angle = Math.random() * Math.PI * 2;
+    const r = Math.random() * 0.75;
+    ripples.push(new Ripple(
+      pondCx + Math.cos(angle) * pondRx * r,
+      pondCy + Math.sin(angle) * pondRy * r,
+      false
+    ));
+  }
+
+  // Clip to pond for ripples and ducks
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(pondCx, pondCy, pondRx, pondRy, 0, 0, Math.PI * 2);
+  ctx.clip();
+
+  // Ripples
+  for (let i = ripples.length - 1; i >= 0; i--) {
+    if (!ripples[i].update()) {
+      ripples.splice(i, 1);
+    } else {
+      ripples[i].draw();
+    }
+  }
+
+  // Ducks
+  for (const duck of ducks) {
+    duck.update();
+    duck.draw();
+  }
+
+  ctx.restore();
+
+  // Instruction text
+  if (ducks.length === 0) {
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.font = '18px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Click the pond to add ducks!', pondCx, pondCy);
+  }
+
+  requestAnimationFrame(loop);
+}
+
+canvas.addEventListener('click', (e) => {
+  if (isInPond(e.clientX, e.clientY)) {
+    ducks.push(new Duck(e.clientX, e.clientY));
+    // Splash ripples
+    ripples.push(new Ripple(e.clientX, e.clientY, true));
+    for (let i = 0; i < 4; i++) {
+      ripples.push(new Ripple(
+        e.clientX + (Math.random() - 0.5) * 20,
+        e.clientY + (Math.random() - 0.5) * 20,
+        false
+      ));
+    }
+  }
+});
+
+canvas.style.cursor = 'pointer';
+initWaterCanvas();
+loop();
+</script>
+</body>
+</html>
